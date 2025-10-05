@@ -1,0 +1,116 @@
+---
+# =============================================================================
+# Playbook: Install and configure NGINX + virtual hosts (vhosts)
+#
+# Purpose
+#   - Ensure NGINX is installed and configured via the `web_nginx` role.
+#   - Pre-create document roots for declared vhosts and seed a basic index.html
+#     for smoke testing (only when missing, never overwriting existing content).
+#   - Proactively stop Apache if present to avoid port 80 conflicts.
+#
+# Safe/Idempotent Design
+#   - Each task is idempotent (e.g., file/dir creation, copy, service actions).
+#   - The `web_nginx` role validates config with `nginx -t` before reloading.
+#   - Seeding index.html is conditional: we stat the file and only create it if
+#     it does NOT already exist.
+#
+# Usage
+#   ansible-playbook -i <inventory> playbooks/web_nginx.yml -l role_app [-vv]
+#
+# Requirements
+#   - The `web_nginx` role must be available in roles_path (local, from Galaxy,
+#     or installed via requirements).
+#   - Group/host variables should define `web_nginx_vhosts` (see examples in
+#     your group_vars/role_app.yml).
+# =============================================================================
+- name: Install and configure NGINX + vhosts
+  hosts: all
+  become: true        # escalate privileges for package/service mgmt
+  gather_facts: true  # gather facts because we use service_facts
+  serial: 1           # roll out hosts one by one for safer changes
+
+  pre_tasks:
+
+    # -------------------------------------------------------------------------
+    # Prevent TCP/80 conflicts: if Apache is present and running, stop/disable it.
+    # Rationale:
+    #   - Many base images ship with Apache enabled by default.
+    #   - NGINX will fail to start if :80 is already bound by Apache.
+    #   - We guard the service action with a presence check via service_facts.
+    # -------------------------------------------------------------------------
+    - name: Stop/disable Apache if present (avoid port 80 conflict)
+      block:
+        - ansible.builtin.service_facts:
+        - name: Stop apache2
+          ansible.builtin.service:
+            name: apache2
+            state: stopped
+            enabled: false
+          when: "'apache2.service' in ansible_facts.services"
+
+    # -------------------------------------------------------------------------
+    # Ensure each vhost's document root exists with correct ownership/mode.
+    # Notes:
+    #   - We only act when `item.root` is defined on the vhost.
+    #   - Owner/group defaults target Debian/Ubuntu (www-data).
+    # -------------------------------------------------------------------------
+    - name: Ensure docroots exist
+      ansible.builtin.file:
+        path: "{{ item.root }}"
+        state: directory
+        owner: "www-data"
+        group: "www-data"
+        mode: "0755"
+      loop: "{{ web_nginx_vhosts }}"
+      when: item.root is defined
+
+    # -------------------------------------------------------------------------
+    # Check if an index.html is present in each document root.
+    # We will seed a minimal test page only if the file is missing.
+    # This avoids overwriting any real application content.
+    # -------------------------------------------------------------------------
+    - name: Check if seed index.html exists
+      ansible.builtin.stat:
+        path: "{{ item.root }}/index.html"
+      loop: "{{ web_nginx_vhosts }}"
+      when: item.root is defined
+      register: _seed_idx
+
+    # -------------------------------------------------------------------------
+    # Seed a very small index.html (smoke test) when missing.
+    # Implementation detail:
+    #   - We iterate over the results of the previous `stat` (so the loop item
+    #     is a result object with `.item` being the original vhost dict).
+    #   - The `when` condition ensures we only create the file if it doesn't exist.
+    #   - The content contains the vhost's server_name and docroot for easy
+    #     verification via curl (optionally with a Host header).
+    # -------------------------------------------------------------------------
+    - name: Seed index.html (smoke test, only if missing)
+      ansible.builtin.copy:
+        dest: "{{ item.item.root }}/index.html"
+        content: |
+          <!doctype html>
+          <html>
+            <head><meta charset="utf-8"><title>{{ item.item.server_name }}</title></head>
+            <body>
+              <h1>{{ item.item.server_name }}</h1>
+              <p>NGINX up & serving from {{ item.item.root }}</p>
+            </body>
+          </html>
+        owner: "www-data"
+        group: "www-data"
+        mode: "0644"
+      loop: "{{ _seed_idx.results | default([]) }}"
+      when:
+        - item is defined
+        - not item.stat.exists
+
+  # ----------------------------------------------------------------------------
+  # Apply the role:
+  #   - Installs nginx, manages conf.d toggles (gzip/proxy),
+  #   - renders and enables server blocks (including a catch-all if enabled),
+  #   - optionally purges unlisted vhosts,
+  #   - validates nginx config (nginx -t), then enables/starts the service.
+  # ----------------------------------------------------------------------------
+  roles:
+    - role: web_nginx
