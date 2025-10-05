@@ -5,5 +5,4 @@
   gather_facts: true
   serial: 1
   roles:
-    # - disk -> Asi si esta en local
-    - jhonnygo.disk # Asi porque esta en el repo de Ansible
+    - jhonnygo.disk
