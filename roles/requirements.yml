@@ -1,9 +1,4 @@
 ---
-collections:
-  - name: amazon.aws
-  - name: ansible.posix
-  - name: community.general
-
 roles:
   - name: jhonnygo.disk
     version: "0.1.5"
@@ -13,3 +8,4 @@ roles:
 
   - name: jhonnygo.web_nginx
     version: "0.1.3"
+    
